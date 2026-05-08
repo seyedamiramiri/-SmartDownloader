@@ -1,36 +1,178 @@
-      - name: Download Windows PyTorch Wheels (Zero Dependencies)
+name: PyTorch Ultra v12.0 (No Releases, Repo Artifact Commit)
+
+on:
+  workflow_dispatch:
+    inputs:
+      python_ver:
+        description: "Python version"
+        required: true
+        default: "3.11"
+      cuda_ver:
+        description: "CUDA version (cu121/cu118/cpu)"
+        required: true
+        default: "cu121"
+      torch_ver:
+        description: "Torch version"
+        required: true
+        default: "2.2.2"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.11
+
+      - name: Prepare variables
+        id: vars
+        shell: bash
         run: |
-          set -e
-          mkdir -p downloads
-
           PY="${{ github.event.inputs.python_ver }}"
-          CUDA="${{ github.event.inputs.cuda_ver }}"
           TORCH="${{ github.event.inputs.torch_ver }}"
+          CUDA="${{ github.event.inputs.cuda_ver }}"
+          PYTAG="$(echo "$PY" | tr -d '.')"
+          BUILD_ID="${{ github.run_id }}"
+          OUTDIR="dist/${TORCH}-${CUDA}-py${PYTAG}-win_amd64"
 
-          PY_MAJOR=$(echo $PY | cut -d '.' -f1)
-          PY_MINOR=$(echo $PY | cut -d '.' -f2)
-          PYTAG="${PY_MAJOR}${PY_MINOR}"
+          echo "PYTAG=$PYTAG" >> "$GITHUB_OUTPUT"
+          echo "TORCH=$TORCH" >> "$GITHUB_OUTPUT"
+          echo "CUDA=$CUDA" >> "$GITHUB_OUTPUT"
+          echo "OUTDIR=$OUTDIR" >> "$GITHUB_OUTPUT"
 
-          BASE_FLAGS="
-            --platform win_amd64
-            --python-version $PYTAG
-            --implementation cp
-            --abi cp$PYTAG
-            --only-binary=:all:
-            --no-deps
-          "
+      - name: Download Windows wheels only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p wheels
 
-          pip download torch=="$TORCH" $BASE_FLAGS \
-            --index-url https://download.pytorch.org/whl/$CUDA \
-            -d downloads/
+          pip download torch=="${{ steps.vars.outputs.TORCH }}" \
+            --index-url "https://download.pytorch.org/whl/${{ steps.vars.outputs.CUDA }}" \
+            --platform win_amd64 \
+            --python-version "${{ steps.vars.outputs.PYTAG }}" \
+            --implementation cp \
+            --abi "cp${{ steps.vars.outputs.PYTAG }}" \
+            --only-binary=:all: \
+            --no-deps \
+            -d wheels
 
-          pip download torchvision $BASE_FLAGS \
-            --index-url https://download.pytorch.org/whl/$CUDA \
-            -d downloads/
+          pip download torchvision \
+            --index-url "https://download.pytorch.org/whl/${{ steps.vars.outputs.CUDA }}" \
+            --platform win_amd64 \
+            --python-version "${{ steps.vars.outputs.PYTAG }}" \
+            --implementation cp \
+            --abi "cp${{ steps.vars.outputs.PYTAG }}" \
+            --only-binary=:all: \
+            --no-deps \
+            -d wheels
 
-          pip download torchaudio $BASE_FLAGS \
-            --index-url https://download.pytorch.org/whl/$CUDA \
-            -d downloads/
+          pip download torchaudio \
+            --index-url "https://download.pytorch.org/whl/${{ steps.vars.outputs.CUDA }}" \
+            --platform win_amd64 \
+            --python-version "${{ steps.vars.outputs.PYTAG }}" \
+            --implementation cp \
+            --abi "cp${{ steps.vars.outputs.PYTAG }}" \
+            --only-binary=:all: \
+            --no-deps \
+            -d wheels
 
-          echo "Downloaded WHLs:"
-          ls -lh downloads
+          echo "Downloaded files:"
+          ls -lh wheels
+
+      - name: Build metadata + checksums + zip
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUTDIR="${{ steps.vars.outputs.OUTDIR }}"
+          mkdir -p "$OUTDIR"
+
+          echo "[" > "$OUTDIR/metadata.json"
+          first=true
+
+          for f in wheels/*.whl; do
+            name="$(basename "$f")"
+            sha="$(sha256sum "$f" | awk '{print $1}')"
+            size="$(stat -c%s "$f")"
+
+            if [ "$first" = true ]; then
+              first=false
+            else
+              echo "," >> "$OUTDIR/metadata.json"
+            fi
+
+            cat >> "$OUTDIR/metadata.json" <<EOF
+  {
+    "file": "$name",
+    "sha256": "$sha",
+    "size": $size
+  }
+EOF
+            cp "$f" "$OUTDIR/"
+          done
+
+          echo "]" >> "$OUTDIR/metadata.json"
+
+          (
+            cd "$OUTDIR"
+            zip -r package.zip ./*.whl metadata.json
+          )
+
+      - name: Update index.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          OUTDIR="${{ steps.vars.outputs.OUTDIR }}"
+          REL_PATH="${OUTDIR#dist/}"
+
+          cat > dist/index.json <<EOF
+{
+  "latest": "$REL_PATH",
+  "path": "$OUTDIR",
+  "torch_version": "${{ steps.vars.outputs.TORCH }}",
+  "cuda": "${{ steps.vars.outputs.CUDA }}",
+  "python_tag": "cp${{ steps.vars.outputs.PYTAG }}",
+  "platform": "win_amd64",
+  "files_page": "https://github.com/${{ github.repository }}/tree/${{ github.ref_name }}/$OUTDIR"
+}
+EOF
+
+      - name: Commit and push dist
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add dist
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Add PyTorch wheels: ${{ steps.vars.outputs.TORCH }} / ${{ steps.vars.outputs.CUDA }} / cp${{ steps.vars.outputs.PYTAG }}"
+          git push
+
+      - name: Print result
+        shell: bash
+        run: |
+          OUTDIR="${{ steps.vars.outputs.OUTDIR }}"
+          cat <<EOF
+{
+  "status": "ok",
+  "repo_tree_url": "https://github.com/${{ github.repository }}/tree/${{ github.ref_name }}/$OUTDIR",
+  "metadata_page_url": "https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/$OUTDIR/metadata.json",
+  "zip_page_url": "https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/$OUTDIR/package.zip"
+}
+EOF
