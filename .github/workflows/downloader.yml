@@ -1,40 +1,4 @@
-name: SmartDownloader - PyTorch Ultra v8.0 (Windows WHL + Split ZIP)
-
-on:
-  workflow_dispatch:
-    inputs:
-      python_ver:
-        description: 'Python version (3.10 / 3.11)'
-        required: true
-        default: '3.11'
-
-      cuda_ver:
-        description: 'CUDA Version (cu121 / cu118 / cpu)'
-        required: true
-        default: 'cu121'
-
-      torch_ver:
-        description: 'Torch version'
-        required: true
-        default: '2.2.2'
-
-permissions:
-  contents: write
-
-jobs:
-  ultra:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: 3.11
-
-      - name: Download Windows PyTorch Wheels (Only Torch/TV/TA)
+      - name: Download Windows PyTorch Wheels (Zero Dependencies)
         run: |
           set -e
           mkdir -p downloads
@@ -47,72 +11,26 @@ jobs:
           PY_MINOR=$(echo $PY | cut -d '.' -f2)
           PYTAG="${PY_MAJOR}${PY_MINOR}"
 
-          # Torch wheels
-          pip download torch=="$TORCH" \
-            --platform win_amd64 \
-            --python-version "$PYTAG" \
-            --implementation cp \
-            --abi cp"$PYTAG" \
-            --only-binary=:all: \
-            --index-url "https://download.pytorch.org/whl/$CUDA" \
+          BASE_FLAGS="
+            --platform win_amd64
+            --python-version $PYTAG
+            --implementation cp
+            --abi cp$PYTAG
+            --only-binary=:all:
+            --no-deps
+          "
+
+          pip download torch=="$TORCH" $BASE_FLAGS \
+            --index-url https://download.pytorch.org/whl/$CUDA \
             -d downloads/
 
-          # TorchVision
-          pip download torchvision \
-            --platform win_amd64 \
-            --python-version "$PYTAG" \
-            --implementation cp \
-            --abi cp"$PYTAG" \
-            --only-binary=:all: \
-            --index-url "https://download.pytorch.org/whl/$CUDA" \
+          pip download torchvision $BASE_FLAGS \
+            --index-url https://download.pytorch.org/whl/$CUDA \
             -d downloads/
 
-          # TorchAudio
-          pip download torchaudio \
-            --platform win_amd64 \
-            --python-version "$PYTAG" \
-            --implementation cp \
-            --abi cp"$PYTAG" \
-            --only-binary=:all: \
-            --index-url "https://download.pytorch.org/whl/$CUDA" \
+          pip download torchaudio $BASE_FLAGS \
+            --index-url https://download.pytorch.org/whl/$CUDA \
             -d downloads/
 
-          echo "Downloaded WHL files:"
+          echo "Downloaded WHLs:"
           ls -lh downloads
-
-      - name: Create ZIP + Auto Split
-        run: |
-          set -e
-          TS=$(date +%s)
-          ZIP="pytorch_win_${TS}.zip"
-
-          cd downloads
-          zip -r "../$ZIP" .
-          cd ..
-          rm -rf downloads
-
-          echo "Main ZIP:"
-          ls -lh "$ZIP"
-
-          # Split if > 90MB
-          MAX_SIZE=$((90 * 1024 * 1024))
-          FILE_SIZE=$(stat -c%s "$ZIP")
-
-          if [ "$FILE_SIZE" -gt "$MAX_SIZE" ]; then
-            echo "ZIP > 90MB → Splitting to 50MB chunks"
-            split -b 50m "$ZIP" "${ZIP}.part_"
-            rm "$ZIP"
-          fi
-
-          echo "Final files:"
-          ls -lh
-
-      - name: Commit & Push ZIPs
-        run: |
-          set -e
-          git config --global user.email "actions@github.com"
-          git config --global user.name "github-actions[bot]"
-
-          git add "*.zip" "*.part_*" 2>/dev/null || true
-          git commit -m "Ultra v8.0 Windows PyTorch WHL Package"
-          git push
