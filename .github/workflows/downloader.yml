@@ -1,4 +1,4 @@
-name: SmartDownloader
+name: PyTorch
 
 on:
   workflow_dispatch:
@@ -9,12 +9,19 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
 
     - uses: actions/setup-python@v5
       with:
         python-version: "3.11"
 
-    - name: Download Windows wheels
+    - name: git safe
+      run: |
+        git config --global http.postBuffer 524288000
+        git config --global core.compression 0
+
+    - name: download wheels
       run: |
         mkdir -p dist
         pip download torch torchvision torchaudio \
@@ -26,16 +33,42 @@ jobs:
           --no-deps \
           -d dist
 
-    - name: Zip package
+    - name: metadata
+      run: |
+        python - << 'PY'
+        import os,json,hashlib
+        out=[]
+        for f in os.listdir("dist"):
+            if f.endswith(".whl"):
+                p="dist/"+f
+                out.append({
+                    "file":f,
+                    "size":os.path.getsize(p),
+                    "sha256":hashlib.sha256(open(p,"rb").read()).hexdigest()
+                })
+        json.dump(out,open("dist/metadata.json","w"),indent=2)
+        json.dump({"files":[i["file"] for i in out]},open("dist/index.json","w"),indent=2)
+        PY
+
+    - name: zip
       run: |
         cd dist
-        zip -r package.zip *.whl
+        zip -r package.zip *.whl metadata.json index.json || true
 
-    - name: Commit files
+    - name: commit push
       run: |
-        git config user.name github-actions
-        git config user.email actions@github.com
-        git add dist/*
-        git commit -m "update wheels" || echo "no changes"
-        git pull --rebase --autostash origin ${{ github.ref_name }}
-        git push
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+        git add dist
+        git diff --cached --quiet && exit 0
+        git commit -m "update wheels"
+
+        git pull --rebase origin main || true
+
+        for i in 1 2 3
+        do
+          git push origin main && break
+          git pull --rebase origin main
+          sleep 3
+        done
