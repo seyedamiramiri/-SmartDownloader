@@ -1,4 +1,4 @@
-name: SmartDownloader - Ultra-Input v5.2
+name: SmartDownloader - Ultra-Input v5.3
 
 on:
   workflow_dispatch:
@@ -6,7 +6,6 @@ on:
       urls:
         description: 'لینک‌ها را با کاما جدا کن'
         required: true
-        default: 'https://download.pytorch.org/whl/cu121/torch-2.2.2+cu121-cp311-cp311-win_amd64.whl'
 
 permissions:
   contents: write
@@ -20,20 +19,66 @@ jobs:
         uses: actions/checkout@v4
 
       - name: 📥 Smart Download
+        shell: bash
         run: |
           set -e
           mkdir -p downloads
+
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+
           IFS=',' read -ra URLS <<< "${{ github.event.inputs.urls }}"
+
           for URL in "${URLS[@]}"; do
             URL=$(echo "$URL" | xargs)
+            [ -z "$URL" ] && continue
+
+            FILE_NAME=$(basename "${URL%%\?*}")
+            TARGET="downloads/$FILE_NAME"
+
             echo "⬇️ Downloading: $URL"
-            wget --continue --tries=15 --timeout=60 --retry-connrefused \
-                 --waitretry=5 --show-progress "$URL" -P downloads/
+
+            if wget \
+              --user-agent="$UA" \
+              --header="Accept: */*" \
+              --continue \
+              --tries=5 \
+              --timeout=60 \
+              --retry-connrefused \
+              --waitretry=3 \
+              --show-progress \
+              "$URL" -O "$TARGET"; then
+              echo "✅ wget success: $FILE_NAME"
+            else
+              echo "⚠️ wget failed, trying curl..."
+
+              if curl -L \
+                -A "$UA" \
+                --retry 5 \
+                --retry-delay 3 \
+                --connect-timeout 30 \
+                -o "$TARGET" \
+                "$URL"; then
+                echo "✅ curl success: $FILE_NAME"
+              else
+                echo "❌ Failed to download: $URL"
+                rm -f "$TARGET"
+              fi
+            fi
           done
 
+          echo "📦 Download folder contents:"
+          ls -lh downloads || true
+
       - name: 🧩 Commit & Push (SecureZIP fallback)
+        shell: bash
         run: |
           set -e
+
+          if [ -z "$(find downloads -type f | head -n 1)" ]; then
+            echo "❌ No files downloaded. Exiting."
+            exit 1
+          fi
+
           git config --global user.email "actions@github.com"
           git config --global user.name "github-actions[bot]"
 
@@ -47,7 +92,7 @@ jobs:
             ZIP_PATH="/tmp/archive_${TS}.zip"
 
             zip -r "$ZIP_PATH" downloads/
-            rm -rf downloads/*
+            find downloads -type f ! -name ".gitkeep" -delete
             mv "$ZIP_PATH" "downloads/archive_${TS}.zip"
 
             git add downloads/
