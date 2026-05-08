@@ -1,64 +1,100 @@
-name: SmartDownloader - SecureZIP Mode
+name: SmartDownloader - Ultra-Stable v5
 
 on:
   workflow_dispatch:
-    inputs:
-      urls:
-        description: 'لینک‌های دانلود (با فاصله جدا کن)'
-        required: true
-      mode:
-        description: 'normal یا zip'
-        required: false
-        default: 'normal'
 
 jobs:
   ultra:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout repo
+      - name: 🧩 Set up job
+        run: echo "::group::[INIT] Setting up workspace"
+      
+      - name: 📂 Checkout repo
         uses: actions/checkout@v4
 
-      - name: Install tools
+      - name: ⚙️ Install tools (Ultra‑Safe)
+        shell: bash
         run: |
-          sudo apt update
-          sudo apt install -y curl aria2 zip
+          set -e
+          echo "::group::[TOOLS] Installing dependencies"
+          sudo apt update -q
+          sudo apt install -y curl aria2 ca-certificates zip unzip git > /dev/null
+          echo "::endgroup::"
 
-      - name: Prepare workspace
-        run: mkdir -p downloads
-
-      - name: Smart Download Engine
+      - name: 📁 Prepare workspace
+        shell: bash
         run: |
-          URLS="${{ github.event.inputs.urls }}"
-          echo "🔗 Links: $URLS"
-          cd downloads
-          for LINK in $URLS; do
-            echo "⬇️ Downloading: $LINK"
-            if [[ "$LINK" =~ "pytorch.org" || "$LINK" =~ "huggingface.co" || "$LINK" =~ "googleusercontent" ]]; then
-              curl -L --retry 10 --retry-delay 10 -O "$LINK"
+          set -e
+          mkdir -p downloads logs
+          echo "🏗 Workspace ready at $(pwd)/downloads"
+
+      - name: 🌐 Smart Download Engine
+        shell: bash
+        run: |
+          set -e
+          echo "::group::[ENGINE] Starting download"
+          URLS=("https://download.pytorch.org/whl/cu121/torch-2.2.2+cu121-cp310-cp310-linux_x86_64.whl")
+          for url in "${URLS[@]}"; do
+            echo "⏳ Downloading: $url"
+            if [[ "$url" == *"pytorch.org"* ]]; then
+              curl -L --retry 5 -o "downloads/$(basename $url)" "$url"
             else
-              aria2c -x 16 -s 16 "$LINK"
+              aria2c -x1 -s1 --retry-wait=5 --max-tries=5 -d downloads "$url"
             fi
           done
-          cd ..
+          echo "::endgroup::"
 
-      - name: Commit & Push (SecureZIP fallback)
-        if: always()
+      - name: 🧠 Commit & Push (SecureZIP fallback + Debug)
+        shell: bash
         run: |
+          set -e
+          exec > >(tee logs/ultra_log.txt) 2>&1
+          echo "::group::[COMMIT] SecureZIP fallback with debug"
+          timestamp() { date +'%H:%M:%S'; }
+
+          echo "$(timestamp) 🪶 Configuring Git..."
           git config --global user.email "actions@github.com"
-          git config --global user.name "GitHub Actions"
-          du -sh downloads || true
-          SIZE_MB=$(du -sm downloads | cut -f1)
-          echo "Total: ${SIZE_MB}MB"
+          git config --global user.name "SmartDownloader"
 
-          # مرحله‌ی معمول
-          git add downloads || true
-          git commit -m "🚀 Auto-add downloads" || echo "Nothing to commit"
-          git pull origin main --rebase || echo "No rebase"
-          git push origin main || (
-            echo "⚠️ Push failed or repo too large — running SecureZIP fallback"
+          echo "$(timestamp) 📦 Checking disk usage..."
+          DISK_USE=$(df -h . | tail -1)
+          echo "$(timestamp) 💾 Disk info: $DISK_USE"
+
+          SIZE_MB=$(du -sm downloads | cut -f1 || echo 0)
+          echo "$(timestamp) 📁 Total size: ${SIZE_MB}MB"
+
+          git add downloads || echo "$(timestamp) ⚠ Nothing to add"
+          git commit -m "Auto batch commit [$(timestamp)]" || echo "Nothing to commit"
+          git pull origin main --rebase || echo "No rebase needed"
+
+          echo "$(timestamp) 🚀 Trying push..."
+          if ! git push origin main; then
+            echo "$(timestamp) ⚠ Push failed → entering ZIP fallback mode"
             mkdir -p /tmp/sdzip
-           ....................................................................................................................................................................................................................................................................................................................................... main --force
-          )
+            ZIP_PATH="/tmp/sdzip/downloads_secure.zip"
+            echo "$(timestamp) Creating ZIP at $ZIP_PATH..."
+            if ! zip -r "$ZIP_PATH" downloads; then
+              echo "❌ ZIP command not found or failed (exit 127)"
+              echo "::error title=ZIP failed::Please verify zip installation."
+              exit 127
+            fi
+            rm -rf downloads
+            mkdir downloads
+            mv "$ZIP_PATH" downloads/
+            du -sh downloads
+            git add downloads
+            git commit -m "🧩 ZIP fallback commit [$(timestamp)]"
+            git push origin main --force
+          fi
 
-      - name: Finish
-        run: echo "✅ SecureZIP mode run complete."
+          echo "::endgroup::"
+
+      - name: 🧾 Finish
+        shell: bash
+        run: |
+          echo "::group::[FINISH] Job completed"
+          echo "✅ SmartDownloader Ultra-Stable v5 finished successfully"
+          ls -lh downloads || true
+          echo "::endgroup::"
