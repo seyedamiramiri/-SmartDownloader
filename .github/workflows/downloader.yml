@@ -1,74 +1,159 @@
-name: PyTorch
+name: SmartDownloader - Final Edition
 
 on:
   workflow_dispatch:
+    inputs:
+      urls:
+        description: "Download URLs (space separated)"
+        required: true
+      mode:
+        description: "normal or zip output"
+        default: "normal"
+      split:
+        description: "Split size in MB (0 = no split)"
+        default: "0"
 
 jobs:
-  build:
+  downloader:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - uses: actions/setup-python@v5
-      with:
-        python-version: "3.11"
+      - name: Install required tools
+        run: |
+          sudo apt update
+          sudo apt install -y aria2 curl wget zip git
 
-    - name: git safe
-      run: |
-        git config --global http.postBuffer 524288000
-        git config --global core.compression 0
+      - name: Prepare directories
+        run: |
+          mkdir -p downloads
+          mkdir -p temp
+          echo "${{ github.event.inputs.urls }}" | tr ' ' '\n' > urls.txt
 
-    - name: download wheels
-      run: |
-        mkdir -p dist
-        pip download torch torchvision torchaudio \
-          --platform win_amd64 \
-          --python-version 311 \
-          --implementation cp \
-          --abi cp311 \
-          --only-binary=:all: \
-          --no-deps \
-          -d dist
+      - name: Smart Download Engine (Final Edition)
+        run: |
 
-    - name: metadata
-      run: |
-        python - << 'PY'
-        import os,json,hashlib
-        out=[]
-        for f in os.listdir("dist"):
-            if f.endswith(".whl"):
-                p="dist/"+f
-                out.append({
-                    "file":f,
-                    "size":os.path.getsize(p),
-                    "sha256":hashlib.sha256(open(p,"rb").read()).hexdigest()
-                })
-        json.dump(out,open("dist/metadata.json","w"),indent=2)
-        json.dump({"files":[i["file"] for i in out]},open("dist/index.json","w"),indent=2)
-        PY
+          get_clean_name() {
+            RAW=$(basename "${1%%\?*}")
+            if [ -z "$RAW" ] || [ "$RAW" = "/" ]; then
+              echo "file_$(date +%s)"
+            else
+              echo "$RAW"
+            fi
+          }
 
-    - name: zip
-      run: |
-        cd dist
-        zip -r package.zip *.whl metadata.json index.json || true
+          smart_download() {
 
-    - name: commit push
-      run: |
-        git config user.name "github-actions[bot]"
-        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            URL="$1"
+            FILE=$(get_clean_name "$URL")
 
-        git add dist
-        git diff --cached --quiet && exit 0
-        git commit -m "update wheels"
+            echo "------------------------------------"
+            echo "Downloading: $URL"
+            echo "Target file: $FILE"
+            echo "------------------------------------"
 
-        git pull --rebase origin main || true
+            for attempt in {1..15}; do
 
-        for i in 1 2 3
-        do
-          git push origin main && break
-          git pull --rebase origin main
-          sleep 3
-        done
+              echo "Attempt $attempt"
+
+              aria2c \
+                --max-connection-per-server=16 \
+                --split=16 \
+                --min-split-size=1M \
+                --continue=true \
+                --auto-file-renaming=false \
+                --allow-overwrite=true \
+                -d downloads \
+                -o "$FILE" \
+                "$URL" && break
+
+              echo "aria2 failed → fallback to curl"
+
+              curl -L \
+                --retry 5 \
+                --retry-delay 4 \
+                --continue-at - \
+                -o "downloads/$FILE" \
+                "$URL" && break
+
+              echo "Waiting before retry..."
+              sleep $(( attempt * attempt ))
+            done
+
+            if [ ! -f "downloads/$FILE" ]; then
+              echo "ERROR: download failed after retries"
+              exit 1
+            fi
+
+            SIZE=$(stat -c%s "downloads/$FILE")
+            if [ "$SIZE" -lt 1500 ]; then
+              if grep -qi html "downloads/$FILE"; then
+                echo "HTML trap detected → switching to chunk mode"
+
+                rm -f "downloads/$FILE"
+
+                CHUNK=20000000
+                START=0
+                INDEX=0
+
+                while true; do
+
+                  END=$((START + CHUNK - 1))
+
+                  curl -L \
+                    -H "Range: bytes=$START-$END" \
+                    -o "temp/$FILE.part$INDEX" \
+                    "$URL"
+
+                  PARTSIZE=$(stat -c%s "temp/$FILE.part$INDEX")
+
+                  if [ "$PARTSIZE" -lt "$CHUNK" ]; then
+                    break
+                  fi
+
+                  START=$((END + 1))
+                  INDEX=$((INDEX + 1))
+
+                done
+
+                cat temp/$FILE.part* > downloads/$FILE
+                rm temp/$FILE.part*
+              fi
+            fi
+
+            echo "Finished: $FILE"
+            echo "------------------------------------"
+          }
+
+          while read URL; do
+            smart_download "$URL"
+          done < urls.txt
+
+      - name: Split files (optional)
+        if: ${{ github.event.inputs.split != '0' }}
+        run: |
+          SIZE=${{ github.event.inputs.split }}
+          mkdir -p downloads_split
+
+          for f in downloads/*; do
+            split -b ${SIZE}M "$f" "downloads_split/$(basename $f).part_"
+          done
+
+      - name: Zip output (optional)
+        if: ${{ github.event.inputs.mode == 'zip' }}
+        run: |
+          zip -r downloads.zip downloads
+
+      - name: Commit results
+        run: |
+          git config --global user.name "SmartDownloader"
+          git config --global user.email "actions@github.com"
+
+          git add downloads || true
+          git add downloads_split || true
+          git add downloads.zip || true
+
+          git commit -m "SmartDownloader Final Edition – new files" || true
+          git push || true
